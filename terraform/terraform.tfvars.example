@@ -1,0 +1,52 @@
+zone_name   = "example.com"
+origin_ipv4 = "203.0.113.10"
+zone_id     = "023e105f4ecef8ad9ca31a8372d0c353" # replace with your real Zone ID
+
+# Optional
+# origin_ipv6 = "2001:db8::10"
+# create_ipv6 = true
+
+# additional_records = [
+#   { name = "_acme-challenge", type = "TXT", content = "challenge-value", ttl = 120 },
+# ]
+
+# To avoid exposing your origin IP, switch to Cloudflare Tunnel CNAMEs
+# use_tunnel          = true
+# tunnel_cname_target = "12345678-aaaa-bbbb-cccc-1234567890ab.cfargotunnel.com"
+
+# Or have Terraform create the Cloudflare Tunnel for you (requires account ID and a secret)
+# manage_tunnel          = true
+# cloudflare_account_id  = "REPLACE_WITH_ACCOUNT_ID"
+# tunnel_name            = "media-stack"
+# tunnel_secret          = "BASE64_32_BYTE_SECRET"
+
+# To let Cloudflare Zero Trust (WARP) reach your LAN without router port forwarding,
+# enable warp routing and list the private CIDRs you want exposed.
+# enable_warp_routing          = true
+# warp_routes                  = ["192.168.1.0/24"]
+# warp_virtual_network_name    = "home-lan"
+# warp_virtual_network_comment = "Home lab network"
+
+# Authentication (choose one method)
+# Method 1: API Token (recommended)
+# cloudflare_api_token = "REPLACE"
+
+# Method 2: Global API Key + Email (not recommended)
+# cloudflare_api_key  = "REPLACE"
+# cloudflare_email    = "user@example.com"
+
+# Cloudflare Access (Zero Trust) – protect hostnames with identity/IP policy
+# enable_access                 = true
+# access_app_hostnames          = ["traefik.example.com", "auth.example.com"] # defaults to all managed hosts
+# access_session_duration       = "24h"
+# access_auto_redirect_to_identity = false
+# access_allow_authenticate_via_warp = false
+# access_email_addresses        = ["alice@example.com"]
+# access_email_domains          = ["example.com"]
+# access_allow_ips              = ["203.0.113.10"]
+
+# Firewall allowlist: block everyone except the IPs listed below
+# enable_waf_allowlist = true
+# waf_allowlist_ips    = ["203.0.113.10"]
+# Optionally scope to specific hosts (defaults to all managed hosts like auth, traefik, etc.)
+# waf_target_hosts      = ["traefik.example.com", "auth.example.com"]

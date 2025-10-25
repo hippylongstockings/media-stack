@@ -1,0 +1,9 @@
+[traefik-auth]
+enabled = true
+filter = traefik-auth
+# Update this path to point at your Traefik access log on the host
+logpath = /path/to/your/docker/logs/cloudserver/traefik/access.log
+findtime = 10m
+maxretry = 8
+bantime = 1h
+backend = auto

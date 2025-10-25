@@ -1,0 +1,19 @@
+.env
+.env copy
+*.log
+*.pid
+*.db
+*.tmp
+*.swp
+.DS_Store
+cloudflared/*.json
+cloudflared/config.yml
+appdata/**
+logs/**
+downloads/**
+recyclarr/logs/**
+terraform/.terraform/**
+terraform/terraform.tfstate*
+shared/**
+scripts/**/__pycache__/**
+.idea/

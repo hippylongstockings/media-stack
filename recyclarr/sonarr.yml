@@ -1,0 +1,20 @@
+sonarr:
+  base_url: http://sonarr:8989
+  api_key: ${SONARR_API_KEY}
+
+  quality_profiles:
+    - name: Series - 1080p
+      upgrade:
+        allowed: true
+        until_quality: WEBDL-1080p
+      min_format_score: 0
+      qualities:
+        - name: Web 1080p
+          min: 400
+          max: 3500
+        - name: Web 720p
+          min: 250
+          max: 2000
+      format_items: []
+
+  custom_formats: []

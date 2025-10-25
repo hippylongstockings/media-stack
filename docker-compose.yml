@@ -1,0 +1,668 @@
+version: "3.9"
+########################### NETWORKS
+# You may customize the network subnet (192.168.90.0/24) below as you please.
+# Docker Compose version 3.5 or higher required to define networks this way.
+ 
+networks:
+  default:
+    driver: bridge
+  t2_proxy:
+    name: t2_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${T2_PROXY_SUBNET}
+
+
+########################### EXTENSION FIELDS
+# Helps eliminate repetition of sections
+# More Info on how to use this: https://github.com/htpcBeginner/docker-traefik/pull/228
+ 
+# Common environment values
+x-environment: &default-tz-puid-pgid
+  TZ: $TZ
+  PUID: $PUID
+  PGID: $PGID
+ 
+# Keys common to some of the core services that we always to automatically restart on failure
+x-common-keys-core: &common-keys-core
+  networks:
+    - t2_proxy
+  security_opt:
+    - no-new-privileges:true
+  restart: always
+ 
+# Keys common to some of the dependent services/apps
+x-common-keys-apps: &common-keys-apps
+  networks:
+    - t2_proxy
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+ 
+# Keys common to some of the services in media-services.txt
+x-common-keys-media: &common-keys-media
+  networks:
+    - t2_proxy
+  security_opt:
+    - no-new-privileges:true
+  restart: "no"
+
+
+########################### SERVICES
+services:
+# Traefik 2 - Reverse Proxy
+  traefik:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: traefik
+    image: traefik:2.7
+    command: # CLI arguments
+      - --global.checkNewVersion=true
+      - --global.sendAnonymousUsage=true
+      - --entryPoints.http.address=:80
+      - --entryPoints.https.address=:443
+      # Allow these IPs to set the X-Forwarded-* headers - Cloudflare IPs: https://www.cloudflare.com/ips/
+      - --entrypoints.https.forwardedHeaders.trustedIPs=$CLOUDFLARE_IPS,$LOCAL_IPS
+      - --entryPoints.traefik.address=:8080
+      - --api=true
+      # - --api.insecure=true
+      - --api.dashboard=true
+      # - --serversTransport.insecureSkipVerify=true
+      - --log=true
+      - --log.filePath=/logs/traefik.log
+      - --log.level=INFO # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/logs/access.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=204-299,400-499,500-599
+      - --providers.docker=true
+      # - --providers.docker.endpoint=unix:///var/run/docker.sock # Use Docker Socket Proxy instead for improved security
+      - --providers.docker.endpoint=tcp://socket-proxy:2375 # Use this instead of the previous line if you have socket proxy.
+      - --providers.docker.exposedByDefault=false
+      - --entrypoints.https.http.tls.options=tls-opts@file
+      - --providers.docker.network=t2_proxy
+      - --providers.docker.swarmMode=false
+      - --providers.file.directory=/rules # Load dynamic configuration from one or more .toml or .yml files in a directory
+      # - --providers.file.filename=/path/to/file # Load dynamic configuration from a file
+      - --providers.file.watch=true # Only works on top level files in the rules folder
+      #- --certificatesResolvers.dns-cloudflare.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory # LetsEncrypt Staging Server - uncomment when testing
+      - --certificatesResolvers.dns-cloudflare.acme.email=$CLOUDFLARE_EMAIL
+      - --certificatesResolvers.dns-cloudflare.acme.storage=/acme.json
+      - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.provider=cloudflare
+      - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+      - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.delayBeforeCheck=90 # To delay DNS check and reduce LE hitrate
+    networks:
+     - t2_proxy
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+      # - target: 8080 # insecure api wont work
+      #   published: 8080
+      #   protocol: tcp
+      #   mode: host
+    volumes:
+      - $DOCKERDIR/appdata/traefik2/rules/cloudserver:/rules # file provider directory
+      # - /var/run/docker.sock:/var/run/docker.sock:ro # If you use Docker Socket Proxy, comment this line out
+      - $DOCKERDIR/appdata/traefik2/acme/acme.json:/acme.json # cert location - you must create this empty file and change permissions to 600
+      - $DOCKERDIR/logs/cloudserver/traefik:/logs # for fail2ban or crowdsec
+      - $DOCKERDIR/shared:/shared
+    depends_on:
+      - socket-proxy
+    environment:
+      - TZ=$TZ
+      - CF_API_EMAIL=$CLOUDFLARE_EMAIL
+      - CF_API_KEY=$CLOUDFLARE_API_KEY
+      - DOMAINNAME_CLOUD_SERVER # Passing the domain name to the traefik container to be able to use the variable in rules.
+    labels:
+      - "traefik.enable=true"
+      # HTTP-to-HTTPS Redirect
+      - "traefik.http.routers.http-catchall.entrypoints=http"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # HTTP Routers
+      - "traefik.http.routers.traefik-rtr.entrypoints=https"
+      - "traefik.http.routers.traefik-rtr.rule=Host(`traefik.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.traefik-rtr.tls=true" # Some people had 404s without this
+      - "traefik.http.routers.traefik-rtr.tls.certresolver=dns-cloudflare"
+      ## Services - API
+      - "traefik.http.routers.traefik-rtr.service=api@internal"
+      ## Middlewares
+      - "traefik.http.routers.traefik-rtr.middlewares=chain-no-auth@file"
+
+
+
+  # Heimdall - Application Dashboard
+  heimdall:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    image: lscr.io/linuxserver/heimdall
+    container_name: heimdall
+    # ports:
+      # - "$HEIMDALL_HTTP_PORT:80" # 80 used by Traefik
+      # - "$HEIMDALL_HTTPS_PORT:443" # 443 used by Traefik. Disabled because we will put Heimdall behind proxy.
+    volumes:
+      - $DOCKERDIR/appdata/heimdall:/config
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.heimdall-rtr.entrypoints=https"
+      - "traefik.http.routers.heimdall-rtr.rule=Host(`$DOMAINNAME_CLOUD_SERVER`,`www.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.heimdall-rtr.tls=true"
+      - "traefik.http.routers.heimdall-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      #- "traefik.http.routers.heimdall-rtr.middlewares=chain-basic-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.heimdall-rtr.service=heimdall-svc"
+      - "traefik.http.services.heimdall-svc.loadbalancer.server.port=80"
+
+
+  vpn:
+    image: thrnz/docker-wireguard-pia
+    container_name: vpn
+    volumes:
+      # Auth token is stored here
+      - pia:/pia
+      # If enabled, the forwarded port is dumped to /pia-shared/port.dat for potential use in other containers
+      - pia-shared:/pia-shared
+      - /lib/modules:/lib/modules:ro
+      - $DOCKERDIR/appdata/transmission/config:/config
+      - $DOCKERDIR/appdata/transmission/data:/data
+      - $EXTDRIVE/downloads:/data/downloads
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    cap_add:
+      - NET_ADMIN
+      # SYS_MODULE might not be needed with a 5.6+ kernel?
+      - SYS_MODULE
+    # Mounting the tun device may be necessary for userspace implementations
+    #devices:
+    #  - /dev/net/tun:/dev/net/tun
+    environment:
+      # The following env vars are required:
+      - LOC=${PIA_LOC}
+      - USER=$OPENVPN_USERNAME
+      - PASS=$OPENVPN_PASSWORD
+      # The rest are optional:
+      - LOCAL_NETWORK=${LOCAL_NETWORK}
+      #- KEEPALIVE=25
+      #- VPNDNS=8.8.8.8,8.8.4.4
+      #- PORT_FORWARDING=1
+      #- WG_USERSPACE=1
+      - UMASK_SET=2
+      - USEMODERN=1
+      - PORT_FORWARDING=1
+    sysctls:
+      # wg-quick fails to set this without --privileged, so set it here instead if needed
+      - net.ipv4.conf.all.src_valid_mark=1
+      # May as well disable ipv6. Should be blocked anyway.
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    # The container has no recovery logic. Use a healthcheck to catch disconnects.
+    healthcheck:
+      test: ping -c 1 www.google.com || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    ports:
+      - 8112:8112
+      - 6881:6881
+      - 6881:6881/udp
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.transmission-rtr.entrypoints=https"
+      - "traefik.http.routers.transmission-rtr.rule=Host(`transmission.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.transmission-rtr.tls=true"
+      - "traefik.http.routers.transmission-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      - "traefik.http.routers.transmission-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.transmission-rtr.service=transmission-svc"
+      - "traefik.http.services.transmission-svc.loadbalancer.server.port=9091"
+
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    restart: unless-stopped
+    network_mode: "service:vpn"
+    # ports:
+    #  - "$TRANSMISSION_PORT:9091" if vpn is enabled you cannot access transmission using host ip
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    # dns:
+    #   - 1.1.1.1
+    #   - 1.0.0.1
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - $DOCKERDIR/appdata/transmission/data:/data
+      - $DOCKERDIR/appdata/transmission/config:/config
+      - $DATADIR/downloads:/downloads
+      - $DATADIR:/safeplace
+    environment:
+      <<: *default-tz-puid-pgid
+      #OPENVPN_CONFIG: "Switzerland-UDP"
+      #OPENVPN_OPTS: --inactive 3600 --ping 10 --ping-exit 60
+      LOCAL_NETWORK: "$LOCAL_NETWORK"
+      UMASK_SET: 2
+      # These transmission settings are not needed as /data/transmission-home/settings.json is persistent
+      TRANSMISSION_RPC_AUTHENTICATION_REQUIRED: "true"
+      TRANSMISSION_RPC_HOST_WHITELIST: "127.0.0.1,$SERVER_IP"
+      TRANSMISSION_UMASK: 002
+      TRANSMISSION_RATIO_LIMIT: 1.0
+      TRANSMISSION_RATIO_LIMIT_ENABLED: "true"
+      TRANSMISSION_ALT_SPEED_DOWN: 2000
+      TRANSMISSION_ALT_SPEED_ENABLED: "false"
+      TRANSMISSION_ALT_SPEED_UP: 100
+      TRANSMISSION_SPEED_LIMIT_DOWN: 10000
+      TRANSMISSION_SPEED_LIMIT_DOWN_ENABLED: "true"
+      TRANSMISSION_SPEED_LIMIT_UP: 500
+      TRANSMISSION_SPEED_LIMIT_UP_ENABLED: "true"
+      TRANSMISSION_DOWNLOAD_DIR: /downloads/complete
+      TRANSMISSION_INCOMPLETE_DIR: /downloads/incomplete
+      TRANSMISSION_INCOMPLETE_DIR_ENABLED: "true"
+      TRANSMISSION_WATCH_DIR: /downloads/watch
+      TRANSMISSION_WATCH_DIR_ENABLED: "true"
+      #TRANSMISSION_COMPLETE_DIR : /Movies
+      LOG_TO_STDOUT: "true"
+    # Traefik routing is defined on the `vpn` service when using network_mode: service:vpn
+
+
+
+  # WatchTower - Automatic Docker Container Updates
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    depends_on:
+      - socket-proxy
+    environment:
+      TZ: $TZ
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_REMOVE_VOLUMES: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_NO_STARTUP_MESSAGE: "false"
+      WATCHTOWER_SCHEDULE: "0 30 12 * * *" # Everyday at 12:30
+      WATCHTOWER_NOTIFICATIONS: shoutrrr
+      WATCHTOWER_NOTIFICATION_URL: "telegram://$TGRAM_BOT_TOKEN@telegram?channels=$TGRAM_CHAT_ID"
+      WATCHTOWER_NOTIFICATIONS_LEVEL: info
+      DOCKER_HOST: tcp://socket-proxy:2375
+      DOCKER_API_VERSION: "1.40"
+
+  # Ombi - Media Requests
+  ombi:
+    image: linuxserver/ombi:latest
+    container_name: ombi
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    # Exposed via Traefik; host port not required
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - $DOCKERDIR/appdata/ombi:/config
+    environment:
+      PUID: $PUID
+      PGID: $PGID
+      TZ: $TZ
+      BASE_URL: /ombi #optional
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.ombi-rtr.entrypoints=https"
+      - "traefik.http.routers.ombi-rtr.rule=Host(`ombi.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.ombi-rtr.tls=true"
+      - "traefik.http.routers.ombi-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      #- "traefik.http.routers.ombi-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.ombi-rtr.service=ombi-svc"
+      - "traefik.http.services.ombi-svc.loadbalancer.server.port=3579"
+
+  # Sonarr - TV Shows management
+  # Set url_base in sonarr settings if using PathPrefix
+  sonarr:
+    <<: *common-keys-media # See EXTENSION FIELDS at the top
+    image: lscr.io/linuxserver/sonarr
+    container_name: sonarr
+    networks:
+      t2_proxy:
+        ipv4_address: ${SONARR_IP}
+    ports:
+      - 8989:8989
+    volumes:
+      - $DOCKERDIR/appdata/sonarr:/config
+      # Optional. See why MediaCover is mounted as volume https://github.com/htpcBeginner/docker-traefik/discussions/147
+     # - $DATADIR/temp/appdata/sonarr/MediaCover:/config/MediaCover
+      - $DATADIR/TV-Shows:/safeplace/TV-Shows/
+      - "/etc/localtime:/etc/localtime:ro"
+      - "$DATADIR/downloads:/downloads"
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers Auth Bypass
+      - "traefik.http.routers.sonarr-rtr-bypass.entrypoints=https"
+      - "traefik.http.routers.sonarr-rtr-bypass.rule=Host(`sonarr.$DOMAINNAME_CLOUD_SERVER`) && (Headers(`X-Api-Key`, `$SONARR_API_KEY`) || Query(`apikey`, `$SONARR_API_KEY`))"
+      - "traefik.http.routers.sonarr-rtr-bypass.tls=true"
+      - "traefik.http.routers.sonarr-rtr-bypass.tls.certresolver=dns-cloudflare"
+      #- "traefik.http.routers.sonarr-rtr-bypass.rule=Headers(`traefik-auth-bypass-key`, `$TRAEFIK_AUTH_BYPASS_KEY`)" # Bypass Auth for LunaSea on iOS
+      - "traefik.http.routers.sonarr-rtr-bypass.priority=100"
+      ## HTTP Routers Auth
+      - "traefik.http.routers.sonarr-rtr.entrypoints=https"
+      - "traefik.http.routers.sonarr-rtr.rule=Host(`sonarr.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.sonarr-rtr.priority=99"
+      - "traefik.http.routers.sonarr-rtr.tls=true"
+      - "traefik.http.routers.sonarr-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      - "traefik.http.routers.sonarr-rtr-bypass.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.sonarr-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.sonarr-rtr.service=sonarr-svc"
+      - "traefik.http.routers.sonarr-rtr-bypass.service=sonarr-svc"
+      - "traefik.http.services.sonarr-svc.loadbalancer.server.port=8989"
+
+
+
+  # Lidarr - Music management
+  lidarr:
+    <<: *common-keys-media
+    image: lscr.io/linuxserver/lidarr
+    container_name: lidarr
+    networks:
+      t2_proxy:
+        ipv4_address: ${LIDARR_IP}
+    ports:
+      - 8686:8686
+    volumes:
+      - $DOCKERDIR/appdata/lidarr:/config
+      - "/etc/localtime:/etc/localtime:ro"
+      - "$DATADIR/Music:/safeplace/Music"
+      - "$DATADIR/downloads:/downloads"
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers Auth Bypass
+      - "traefik.http.routers.lidarr-rtr-bypass.entrypoints=https"
+      - "traefik.http.routers.lidarr-rtr-bypass.rule=Host(`lidarr.$DOMAINNAME_CLOUD_SERVER`) && (Headers(`X-Api-Key`, `$LIDARR_API_KEY`) || Query(`apikey`, `$LIDARR_API_KEY`))"
+      - "traefik.http.routers.lidarr-rtr-bypass.tls=true"
+      - "traefik.http.routers.lidarr-rtr-bypass.tls.certresolver=dns-cloudflare"
+      - "traefik.http.routers.lidarr-rtr-bypass.priority=100"
+      ## HTTP Routers Auth
+      - "traefik.http.routers.lidarr-rtr.entrypoints=https"
+      - "traefik.http.routers.lidarr-rtr.rule=Host(`lidarr.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.lidarr-rtr.priority=99"
+      - "traefik.http.routers.lidarr-rtr.tls=true"
+      - "traefik.http.routers.lidarr-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      - "traefik.http.routers.lidarr-rtr-bypass.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.lidarr-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.lidarr-rtr.service=lidarr-svc"
+      - "traefik.http.routers.lidarr-rtr-bypass.service=lidarr-svc"
+      - "traefik.http.services.lidarr-svc.loadbalancer.server.port=8686"
+
+
+
+  youtubedl-material:
+    <<: *common-keys-apps
+    image: tzahi12345/youtubedl-material:latest
+    container_name: youtubedl-material
+    networks:
+      - t2_proxy
+    volumes:
+      - $DOCKERDIR/appdata/youtubedl-material:/app/appdata
+      - $DATADIR/downloads/youtubedl-material:/app/video
+      - $DATADIR/downloads/youtubedl-material/audio:/app/audio
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      TZ: $TZ
+      ALLOW_CONFIG_MUTATIONS: "true"
+      YTDL_AUDIO_ONLY: "true"
+      YTDL_AUDIO_FORMAT: "mp3"
+      YTDL_SUBSCRIPTIONS_CHECK_INTERVAL: "300"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ytdl-rtr.entrypoints=https"
+      - "traefik.http.routers.ytdl-rtr.rule=Host(`ytdl.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.ytdl-rtr.tls=true"
+      - "traefik.http.routers.ytdl-rtr.tls.certresolver=dns-cloudflare"
+      - "traefik.http.routers.ytdl-rtr.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.ytdl-rtr.service=ytdl-svc"
+      - "traefik.http.services.ytdl-svc.loadbalancer.server.port=17442"
+
+
+
+  telegram-bot:
+    image: python:3.11-alpine
+    container_name: telegram-bot
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    depends_on:
+      - transmission
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TGRAM_BOT_TOKEN: $TGRAM_BOT_TOKEN
+      TGRAM_CHAT_ID: $TGRAM_CHAT_ID
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org/bot}
+      TRANSMISSION_RPC_URL: ${TRANSMISSION_RPC_URL:-http://vpn:9091/transmission/rpc}
+      TGRAM_POLL_TIMEOUT: ${TGRAM_POLL_TIMEOUT:-60}
+      RADARR_URL: ${RADARR_URL:-http://radarr:7878}
+      RADARR_API_KEY: $RADARR_API_KEY
+      SONARR_URL: ${SONARR_URL:-http://sonarr:8989}
+      SONARR_API_KEY: $SONARR_API_KEY
+      SERVICES_TO_CHECK: ${SERVICES_TO_CHECK:-traefik,vpn,transmission,sonarr,radarr,lidarr,prowlarr}
+      DISK_MOUNT_PATH: ${DISK_MOUNT_PATH:-/safeplace}
+      DISK_WARN_THRESHOLD_GB: ${DISK_WARN_THRESHOLD_GB:-50}
+      DOCKER_API_URL: ${DOCKER_API_URL:-http://socket-proxy:2375}
+      CF_API_BASE: ${CF_API_BASE:-https://api.cloudflare.com/client/v4}
+      CF_API_TOKEN: ${CF_API_TOKEN:-}
+      CF_ACCOUNT_ID: ${CF_ACCOUNT_ID:-}
+      CF_TUNNEL_ID: ${CF_TUNNEL_ID:-}
+    working_dir: /app
+    volumes:
+      - ./scripts/telegram:/app:ro
+    command: python bot.py
+
+
+
+  # Radarr - Movie management
+  # Set url_base in radarr settings if using PathPrefix
+  radarr:
+    <<: *common-keys-media # See EXTENSION FIELDS at the top
+    image: lscr.io/linuxserver/radarr:nightly # latest was causing "Error parsing column 45"
+    container_name: radarr
+    networks:
+      t2_proxy:
+        ipv4_address: ${RADARR_IP}
+    ports:
+      - 7878:7878
+    volumes:
+      - $DOCKERDIR/appdata/radarr:/config
+      - $DATADIR/Movies:/safeplace/Movies
+      - "/etc/localtime:/etc/localtime:ro"
+      - "$DATADIR/downloads:/downloads"
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers Auth Bypass
+      - "traefik.http.routers.radarr-rtr-bypass.entrypoints=https"
+      - "traefik.http.routers.radarr-rtr-bypass.rule=Host(`radarr.$DOMAINNAME_CLOUD_SERVER`) && (Headers(`X-Api-Key`, `$RADARR_API_KEY`) || Query(`apikey`, `$RADARR_API_KEY`))"
+      - "traefik.http.routers.radarr-rtr-bypass.tls=true"
+      - "traefik.http.routers.radarr-rtr-bypass.tls.certresolver=dns-cloudflare"
+      #- "traefik.http.routers.radarr-rtr-bypass.rule=Headers(`traefik-auth-bypass-key`, `$TRAEFIK_AUTH_BYPASS_KEY`)" # Bypass Auth for LunaSea on iOS
+      - "traefik.http.routers.radarr-rtr-bypass.priority=100"
+      ## HTTP Routers Auth
+      - "traefik.http.routers.radarr-rtr.entrypoints=https"
+      - "traefik.http.routers.radarr-rtr.rule=Host(`radarr.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.radarr-rtr.priority=99"
+      - "traefik.http.routers.radarr-rtr.tls=true"
+      - "traefik.http.routers.radarr-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      - "traefik.http.routers.radarr-rtr-bypass.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.radarr-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.radarr-rtr.service=radarr-svc"
+      - "traefik.http.routers.radarr-rtr-bypass.service=radarr-svc"
+      - "traefik.http.services.radarr-svc.loadbalancer.server.port=7878"
+
+  ############################# INDEXERS
+
+  # Prowlarr - Torrent proxy
+  prowlarr:
+    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+    image: ghcr.io/linuxserver/prowlarr:develop
+    container_name: prowlarr
+    networks:
+      t2_proxy:
+        ipv4_address: ${PROWLARR_IP}
+    # ports:
+    #  - "$PROWLARR_PORT:9696"
+    volumes:
+      - $DOCKERDIR/appdata/prowlarr:/config
+      - "/etc/localtime:/etc/localtime:ro"
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.prowlarr-rtr.entrypoints=https"
+      - "traefik.http.routers.prowlarr-rtr.rule=Host(`prowlarr.$DOMAINNAME_CLOUD_SERVER`)"
+      - "traefik.http.routers.prowlarr-rtr.tls=true"
+      - "traefik.http.routers.prowlarr-rtr.tls.certresolver=dns-cloudflare"
+      ## Middlewares
+      - "traefik.http.routers.prowlarr-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.prowlarr-rtr.service=prowlarr-svc"
+      - "traefik.http.services.prowlarr-svc.loadbalancer.server.port=9696"
+
+
+
+  # Cloudflared - Cloudflare Zero Trust tunnel connector
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    depends_on:
+      - traefik
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    environment:
+      TZ: $TZ
+      LOG_LEVEL: info
+      LOG_HTML: "false"
+      CAP_ADD_STEALTH: "true"
+      CAPTCHA_SOLVER: none
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8191/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:latest
+    container_name: recyclarr
+    restart: "no"
+    networks:
+      - t2_proxy
+    depends_on:
+      - radarr
+      - sonarr
+      - lidarr
+    environment:
+      RADARR_API_KEY: $RADARR_API_KEY
+      SONARR_API_KEY: $SONARR_API_KEY
+      LIDARR_API_KEY: $LIDARR_API_KEY
+    volumes:
+      - ./recyclarr:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      recyclarr sync &&
+      sleep infinity
+
+  # Docker Socket Proxy - protect docker.sock and provide read-only API
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: socket-proxy
+    restart: unless-stopped
+    networks:
+      - t2_proxy
+    environment:
+      - LOG_LEVEL=info
+      - EVENTS=1
+      - PING=1
+      - VERSION=1
+      - AUTH=0
+      - SECRETS=0
+      - POST=0
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - CONTAINERS=1
+      - DISTRIBUTION=0
+      - EXEC=0
+      - IMAGES=1
+      - INFO=1
+      - NETWORKS=1
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=1
+      - SESSION=0
+      - SWARM=0
+      - SYSTEM=0
+      - TASKS=1
+      - VOLUMES=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Fail2ban - protect Traefik from brute-force attempts
+  fail2ban:
+    image: crazymax/fail2ban:latest
+    container_name: fail2ban
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TZ=$TZ
+      - F2B_LOG_TARGET=/data/fail2ban.log
+      - F2B_LOG_LEVEL=INFO
+    volumes:
+      - $DOCKERDIR/logs/cloudserver/traefik:/var/log/traefik:ro
+      - $DOCKERDIR/ops/fail2ban/traefik/traefik-auth.conf:/data/filter.d/traefik-auth.conf:ro
+      - $DOCKERDIR/ops/fail2ban/traefik/jail.local.docker:/data/jail.d/traefik-auth.local:ro
+      - $DOCKERDIR/appdata/fail2ban:/data
+
+volumes:
+    pia:
+    pia-shared:

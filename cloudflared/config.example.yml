@@ -1,0 +1,18 @@
+# Example Cloudflared configuration
+# This file shows the structure rendered by Terraform.
+# cloudflared/config.yml is generated per-environment and ignored by git.
+
+tunnel: "<TUNNEL_ID>"
+credentials-file: "/etc/cloudflared/<TUNNEL_ID>.json"
+no-autoupdate: true
+loglevel: info
+ingress:
+  - hostname: "media.example.com"
+    service: https://traefik:443
+  - hostname: "sonarr.media.example.com"
+    service: https://traefik:443
+  - hostname: "radarr.media.example.com"
+    service: https://traefik:443
+  - service: http_status:404
+originRequest:
+  noTLSVerify: true

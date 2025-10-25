@@ -1,0 +1,19 @@
+lidarr:
+  base_url: http://lidarr:8686
+  api_key: ${LIDARR_API_KEY}
+
+  quality_profiles:
+    - name: Music - FLAC/MP3
+      upgrade:
+        allowed: true
+        until_quality: FLAC
+      qualities:
+        - name: FLAC
+          min: 20
+          max: 400
+        - name: MP3
+          min: 10
+          max: 150
+      format_items: []
+
+  custom_formats: []
